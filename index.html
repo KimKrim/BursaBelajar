@@ -879,10 +879,10 @@ const CREDIT_PROVIDERS = [
 ];
 
 const WORLD_NEWS_STATIC = [
-  { t: "Ketegangan Selat Hormuz Meningkat: Harga Minyak dan Emas Naik Tajam", s: "Bloomberg Markets", d: "Risiko geopolitik di Timur Tengah memicu kekhawatiran pasokan energi dunia, memicu lonjakan harga komoditas tambang dan energi mentah.", sent: "geo" },
-  { t: "The Federal Reserve Buka Peluang Pelonggaran Moneter Lanjutan", s: "Financial Times", d: "Penurunan inflasi AS memberi sinyal pemangkasan suku bunga acuan, pasar saham dan kripto merespons dengan penguatan likuiditas.", sent: "pos" },
-  { t: "Investasi Infrastruktur Chip AI Capai Rekor Baru", s: "Wall Street Journal", d: "Permintaan prosesor semikonduktor canggih dari NVIDIA, TSMC, dan ASML terus melonjak seiring adopsi enterprise global.", sent: "pos" },
-  { t: "Disrupsi Rantai Pasok Logistik Kapal Kontainer Terhambat di Terusan Suez", s: "Reuters Shipping", d: "Tarif angkutan kargo kapal petikemas laut melompat 25% akibat pengalihan rute pelayaran Tanjung Harapan.", sent: "neg" }
+  { t: "Ketegangan Selat Hormuz Meningkat: Harga Minyak dan Emas Naik Tajam", s: "Simulasi BursaBelajar", d: "Risiko geopolitik di Timur Tengah memicu kekhawatiran pasokan energi dunia, memicu lonjakan harga komoditas tambang dan energi mentah.", sent: "geo" },
+  { t: "The Federal Reserve Buka Peluang Pelonggaran Moneter Lanjutan", s: "Simulasi BursaBelajar", d: "Penurunan inflasi AS memberi sinyal pemangkasan suku bunga acuan, pasar saham dan kripto merespons dengan penguatan likuiditas.", sent: "pos" },
+  { t: "Investasi Infrastruktur Chip AI Capai Rekor Baru", s: "Simulasi BursaBelajar", d: "Permintaan prosesor semikonduktor canggih dari NVIDIA, TSMC, dan ASML terus melonjak seiring adopsi enterprise global.", sent: "pos" },
+  { t: "Disrupsi Rantai Pasok Logistik Kapal Kontainer Terhambat di Terusan Suez", s: "Simulasi BursaBelajar", d: "Tarif angkutan kargo kapal petikemas laut melompat 25% akibat pengalihan rute pelayaran Tanjung Harapan.", sent: "neg" }
 ];
 
 const SIM_EVENTS_MACRO = [
@@ -911,6 +911,7 @@ let newsFilter = "all";
 let pendingDCATicker = "";
 
 let simSpeedMultiplier = 1;
+let localStorageWarningShown = false;
 let masterTimer = null;
 let lastWallClock = Date.now();
 let dayAccumulator = 0;
@@ -955,16 +956,24 @@ function initFreshState() {
   });
 
   WORLD_NEWS_STATIC.forEach(n => {
-    State.newsFeed.unshift({ date: State.currentDate, title: n.t, desc: n.d, source: n.s, isReal: true, sent: n.sent });
+    State.newsFeed.unshift({ date: State.currentDate, title: n.t, desc: n.d, source: 'Simulasi BursaBelajar', isReal: false, sent: n.sent });
   });
 }
 
 function saveState() {
+  if (!State) return;
   State.lastSavedDate = Date.now();
+  if (Array.isArray(State.txHistory) && State.txHistory.length > 500) State.txHistory = State.txHistory.slice(0, 500);
+  if (Array.isArray(State.newsFeed) && State.newsFeed.length > 50) State.newsFeed = State.newsFeed.slice(0, 50);
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(State));
+    localStorageWarningShown = false;
   } catch(e) {
-    console.error("Gagal simpan", e);
+    console.error("Gagal simpan data lokal", e);
+    if (!localStorageWarningShown) {
+      localStorageWarningShown = true;
+      showToast("⚠️ Data belum tersimpan di perangkat. Penyimpanan browser penuh atau tidak tersedia; ekspor backup sekarang.");
+    }
   }
 }
 
@@ -973,6 +982,8 @@ function loadState() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if(raw) {
       State = JSON.parse(raw);
+      if (!Array.isArray(State.newsFeed)) State.newsFeed = [];
+      normalizeNewsFeed();
       MASTER_ASSETS.forEach(a => {
         if(!State.prices[a[0]]) {
           let price = 1.0;
@@ -1093,8 +1104,17 @@ function evaluateAutoInvest() {
   State.autoInvestPlans.forEach(plan => {
     if(!plan.active) return;
 
+    const ticker = plan.ticker;
+    if (State.companyStatus[ticker] === 'bangkrut') {
+      plan.active = false;
+      plan.disabledReason = 'bangkrut';
+      addNews(`Auto-Invest Dinonaktifkan: ${ticker}`, `Rencana pembelian rutin dihentikan karena aset berstatus bangkrut dan tidak lagi dapat dibeli.`, false, 'neg');
+      showToast(`⛔ DCA ${ticker} dinonaktifkan: aset bangkrut.`);
+      saveState();
+      return;
+    }
+
     if(State.currentDate >= plan.nextRunDate) {
-      const ticker = plan.ticker;
       const item = ASSET_REGISTRY[ticker];
       if(!item) return;
 
@@ -1160,7 +1180,16 @@ function evaluateTrailingStops() {
   if(!State.trailingStops || !State.trailingStops.length) return;
   State.trailingStops = State.trailingStops.filter(ts => {
     const pos = State.portfolio[ts.ticker];
-    if(!pos || pos.qty < ts.qty) return false;
+    if (!pos || pos.qty <= 0) {
+      addNews(`Trailing Stop Dibatalkan: ${ts.ticker}`, `Trailing stop dihapus karena posisi ${ts.ticker} sudah tidak dimiliki.`, false, 'neg');
+      showToast(`⚠️ Trailing stop ${ts.ticker} dibatalkan: posisi sudah tidak ada.`);
+      return false;
+    }
+    if (pos.qty + 1e-8 < ts.qty) {
+      ts.qty = pos.qty;
+      addNews(`Trailing Stop Disesuaikan: ${ts.ticker}`, `Jumlah trailing stop disesuaikan dengan sisa posisi menjadi ${pos.qty.toFixed(4)} unit.`, false, 'neutral');
+      showToast(`ℹ️ Kuantitas trailing stop ${ts.ticker} disesuaikan dengan sisa posisi.`);
+    }
 
     const curP = getAssetPriceIDR(ts.ticker);
     if(curP > ts.highestPriceSeen) {
@@ -1249,7 +1278,16 @@ function evaluateAutomatedOrders() {
   State.orders = State.orders.filter(order => {
     const p = getAssetPriceIDR(order.ticker);
     const pos = State.portfolio[order.ticker];
-    if(!pos || pos.qty < order.qty) return false;
+    if (!pos || pos.qty <= 0) {
+      addNews(`Order ${order.type} Dibatalkan: ${order.ticker}`, `Order otomatis dibatalkan karena posisi ${order.ticker} sudah tidak dimiliki.`, false, 'neg');
+      showToast(`⚠️ Order ${order.type} ${order.ticker} dibatalkan: posisi sudah tidak ada.`);
+      return false;
+    }
+    if (pos.qty + 1e-8 < order.qty) {
+      order.qty = pos.qty;
+      addNews(`Order ${order.type} Disesuaikan: ${order.ticker}`, `Jumlah order otomatis disesuaikan dengan sisa posisi menjadi ${pos.qty.toFixed(4)} unit.`, false, 'neutral');
+      showToast(`ℹ️ Kuantitas order ${order.ticker} disesuaikan dengan sisa posisi.`);
+    }
 
     let trigger = false;
     if(order.type === 'TP' && p >= order.targetPrice) trigger = true;
@@ -1297,8 +1335,14 @@ function processLoansCycle() {
   });
 }
 
+function normalizeNewsFeed() {
+  if (!State) return;
+  State.newsFeed = Array.isArray(State.newsFeed) ? State.newsFeed.filter(n => n && typeof n === 'object').slice(0, 50) : [];
+  State.newsFeed.forEach(n => { n.isReal = false; n.source = 'Simulasi BursaBelajar'; });
+}
+
 function addNews(title, desc, isReal, sent) {
-  State.newsFeed.unshift({ date: State.currentDate, title, desc, isReal: !!isReal, source: isReal ? 'Berita Dunia Nyata' : 'Simulasi Global', sent: sent || 'neutral' });
+  State.newsFeed.unshift({ date: State.currentDate, title, desc, isReal: false, source: 'Simulasi BursaBelajar', sent: sent || 'neutral' });
   if(State.newsFeed.length > 50) State.newsFeed.pop();
 }
 
@@ -1325,22 +1369,51 @@ function getSMA(slice, period = 20) {
   return sum / period;
 }
 
-function getEMA(slice, period = 9) {
-  if(slice.length < period) return slice[slice.length - 1];
+function getEMASeries(slice, period = 9) {
+  if (!slice || !slice.length) return [];
+  const values = slice.map(Number);
+  const out = new Array(values.length).fill(null);
+  if (values.length < period) { out[values.length - 1] = values[values.length - 1]; return out; }
   const k = 2 / (period + 1);
-  let ema = slice[slice.length - period];
-  for(let i = slice.length - period + 1; i < slice.length; i++) {
-    ema = slice[i] * k + ema * (1 - k);
+  let seed = 0;
+  for (let i = 0; i < period; i++) seed += values[i];
+  let ema = seed / period;
+  out[period - 1] = ema;
+  for (let i = period; i < values.length; i++) {
+    ema = values[i] * k + ema * (1 - k);
+    out[i] = ema;
   }
-  return ema;
+  return out;
+}
+
+function getEMA(slice, period = 9) {
+  if (!slice || !slice.length) return 0;
+  const series = getEMASeries(slice, period);
+  return series[series.length - 1] == null ? slice[slice.length - 1] : series[series.length - 1];
 }
 
 function getMACD(slice) {
-  const ema12 = getEMA(slice, 12);
-  const ema26 = getEMA(slice, 26);
-  const macdLine = ema12 - ema26;
-  const signal = macdLine * 0.85;
+  if (!slice || !slice.length) return { macd: 0, signal: 0, hist: 0 };
+  const e12 = getEMASeries(slice, 12), e26 = getEMASeries(slice, 26);
+  const start = Math.max(11, 25);
+  const line = [];
+  for (let i = start; i < slice.length; i++) {
+    if (e12[i] != null && e26[i] != null) line.push(e12[i] - e26[i]);
+  }
+  if (!line.length) return { macd: 0, signal: 0, hist: 0 };
+  const signalSeries = getEMASeries(line, 9);
+  const macdLine = line[line.length - 1];
+  const signal = signalSeries[signalSeries.length - 1] == null ? macdLine : signalSeries[signalSeries.length - 1];
   return { macd: macdLine, signal, hist: macdLine - signal };
+}
+
+function hasGoldenCross(slice) {
+  if (!slice || slice.length < 201) return false;
+  const end = slice.length;
+  const sma50Now = getSMA(slice, 50), sma200Now = getSMA(slice, 200);
+  const prev = slice.slice(0, end - 1);
+  const sma50Prev = getSMA(prev, 50), sma200Prev = getSMA(prev, 200);
+  return sma50Prev <= sma200Prev && sma50Now > sma200Now;
 }
 
 function getATR(slice, period = 14) {
@@ -1365,6 +1438,11 @@ function getSupportResistance(slice) {
   const support = Math.min(...recent);
   const resistance = Math.max(...recent);
   return { support, resistance };
+}
+
+function hasWholeWord(text, word) {
+  const escaped = String(word).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('(^|[^a-z0-9])' + escaped + '($|[^a-z0-9])', 'i').test(String(text || ''));
 }
 
 function runAIScreener() {
@@ -1394,17 +1472,18 @@ function runAIScreener() {
     let reasons = [];
 
     if(rsi < 35) { score += 20; reasons.push(`RSI Oversold (${rsi.toFixed(1)}): Terdiskon sangat murah`); }
-    if(macd.macd > macd.signal) { score += 15; reasons.push(`MACD Bullish Crossover: Momentum beli terakselerasi`); }
+    if(macd.macd > macd.signal) { score += 15; reasons.push(`MACD Bullish: Garis MACD berada di atas signal line`); }
     if(ema9 > ema21) { score += 10; reasons.push(`Trend Cepat (EMA 9 > 21): Konfirmasi momentum naik`); }
-    if(curP > sma20 && sma20 > sma50) { score += 15; reasons.push(`Golden Cross: Bullish jangka menengah`); }
+    if(hasGoldenCross(hist)) { score += 15; reasons.push(`Golden Cross: SMA 50 memotong ke atas SMA 200`); }
+    else if(sma50 > getSMA(hist, 200)) { score += 8; reasons.push(`Tren jangka panjang positif: SMA 50 di atas SMA 200`); }
     if(curP <= bb.lower * 1.01) { score += 15; reasons.push(`Pantulan Batas Bawah Bollinger Bands`); }
     if(boost > 0.01) { score += 15; reasons.push(`Katalis makro positif di sektor ${item[7].split('&')[0].trim()}`); }
     if(st === 'naik') { score += 20; reasons.push(`Status korporasi 'Naik Kelas' dengan ekspansi operasional`); }
 
-    const fx = FX_RATES[item[5]] || 1;
+    const fx = getFXRate(item[5]);
     const priceIDR = curP * fx;
     const targetPriceIDR = Math.max(priceIDR * 1.08, sr.resistance * fx);
-    const stopLossPriceIDR = Math.min(priceIDR * 0.94, (curP - (atr * 1.5)) * fx);
+    const stopLossPriceIDR = Math.max(priceIDR * 0.01, Math.min(priceIDR * 0.94, (curP - (atr * 1.5)) * fx));
     const potentialGain = ((targetPriceIDR - priceIDR) / priceIDR) * 100;
     const riskPct = ((priceIDR - stopLossPriceIDR) / priceIDR) * 100;
     const rrRatio = (potentialGain / (riskPct || 1)).toFixed(2);
@@ -1440,7 +1519,7 @@ function runAIScreener() {
     if(st === 'bangkrut') { score += 50; reasons.push(`DARURAT: Emiten bangkrut/pailit! Amankan modal secepatnya`); }
     if(pnlPct >= 0.25) { score += 25; reasons.push(`Take Profit Institusional: Keuntungan telah mencapai +${(pnlPct*100).toFixed(1)}%`); }
     if(rsi > 72) { score += 20; reasons.push(`RSI Overbought (${rsi.toFixed(1)}): Rentan koreksi pembalikan arah`); }
-    if(macd.macd < macd.signal) { score += 15; reasons.push(`MACD Bearish Crossover: Tren kenaikan mulai melemah`); }
+    if(macd.macd < macd.signal) { score += 15; reasons.push(`MACD Bearish: Garis MACD berada di bawah signal line`); }
     if(curP >= bb.upper * 0.99) { score += 15; reasons.push(`Menembus batas atas Bollinger Bands (Jenuh beli)`); }
     if(boost < -0.015) { score += 15; reasons.push(`Sentimen sektor tertekan pelemahan makroekonomi`); }
 
@@ -1458,12 +1537,25 @@ function runAIScreener() {
 /* =========================================================================
    5. HELPER MONETER & FORMATTER
    ========================================================================= */
+const missingFXWarnings = new Set();
+function getFXRate(currency) {
+  const rate = FX_RATES[currency];
+  if (Number.isFinite(rate) && rate > 0) return rate;
+  if (!missingFXWarnings.has(currency)) {
+    missingFXWarnings.add(currency);
+    console.error(`Kurs simulator tidak tersedia untuk mata uang: ${currency}`);
+    if (typeof showToast === 'function') showToast(`⚠️ Kurs ${currency} belum tersedia; nilai aset tidak dihitung sebagai IDR 1:1.`);
+  }
+  return 0;
+}
+
 function getAssetPriceIDR(ticker) {
   const asset = ASSET_REGISTRY[ticker];
   if(!asset) return 0;
   const hist = State.prices[ticker];
+  if (!Array.isArray(hist) || !hist.length) return 0;
   const lastRaw = hist[hist.length - 1];
-  const rate = FX_RATES[asset[5]] || 1;
+  const rate = getFXRate(asset[5]);
   return lastRaw * rate;
 }
 
@@ -1547,8 +1639,9 @@ function generateTechnicalChart(hist, days) {
       const prev = slice[idx - 1] || val;
       const open = prev;
       const close = val;
-      const high = Math.max(open, close) * (1 + Math.abs(randGaussian() * 0.003));
-      const low = Math.min(open, close) * (1 - Math.abs(randGaussian() * 0.003));
+      const wickPct = Math.min(0.02, Math.max(0.001, Math.abs(close - open) / (Math.abs(open) || 1) * 0.35));
+      const high = Math.max(open, close) * (1 + wickPct);
+      const low = Math.min(open, close) * (1 - wickPct);
 
       const x = (idx / (slice.length - 1)) * W;
       const yOpen = H - pad - ((open - min) / range) * (H - pad * 2);
@@ -1614,6 +1707,12 @@ function generateTechnicalChart(hist, days) {
 /* =========================================================================
    6. VIEWS & NAVIGATION TABS
    ========================================================================= */
+function escapeHTML(value) {
+  return String(value).replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[character]));
+}
+
 const TABS = [
   ['pasar', '📈 Pasar Global'],
   ['heatmap', '🗺️ Heatmap Sektor'],
@@ -1677,7 +1776,7 @@ function renderMarketView() {
     let matchCat = false;
     if(!catFilter) matchCat = true;
     else if(catFilter === 'fav') matchCat = State.watchlist.includes(item[0]);
-    else if(catFilter === 'tech') matchCat = item[7].toLowerCase().includes('cloud') || item[7].toLowerCase().includes('chip') || item[7].toLowerCase().includes('ai') || item[7].toLowerCase().includes('software') || item[7].toLowerCase().includes('semikonduktor');
+    else if(catFilter === 'tech') matchCat = item[7].toLowerCase().includes('cloud') || item[7].toLowerCase().includes('chip') || hasWholeWord(item[7], 'ai') || item[7].toLowerCase().includes('software') || item[7].toLowerCase().includes('semikonduktor');
     else if(catFilter === 'ship') matchCat = item[7].toLowerCase().includes('kapal') || item[7].toLowerCase().includes('pelayaran') || item[7].toLowerCase().includes('logistik') || item[7].toLowerCase().includes('kargo');
     else if(catFilter === 'dc') matchCat = item[7].toLowerCase().includes('data center') || item[7].toLowerCase().includes('server') || item[7].toLowerCase().includes('hosting');
     else if(catFilter === 'start') matchCat = ['GOTO','BUKA','BELI','SE','GRAB','COIN','ABNB','UBER','DASH','SNOW','PLTR','HOOD','NU','CPNG','PINS','RBLX','SNAP','DUOL','RDDT','ARM','AFRM','SOFI','UPST','PATH','IOT','CFLT','MDB','DDOG','NET','ZS','OKTA','DOCU','ZM','ETSY','CVNA','RIVN','LCID','AUR','JOBY','IONQ'].includes(item[0]);
@@ -1753,7 +1852,7 @@ function renderMarketView() {
   return `
     <div class="grid-2" style="margin-bottom:14px;">
       <div class="card" style="margin-bottom:0;">
-        <span style="font-size:11px; color:var(--text-sub); font-weight:700; text-transform:uppercase;">🔥 Top Gainers Hari Ini</span>
+        <span style="font-size:11px; color:var(--text-sub); font-weight:700; text-transform:uppercase;">🔥 Top Gainers Perubahan Terakhir</span>
         <div style="display:flex; gap:10px; margin-top:8px; flex-wrap:wrap;">
           ${topGainers.map(g => `
             <div style="background:var(--bg-card); padding:8px 12px; border-radius:6px; flex:1; cursor:pointer;" onclick="viewAsset('${g.ticker}')">
@@ -1764,7 +1863,7 @@ function renderMarketView() {
         </div>
       </div>
       <div class="card" style="margin-bottom:0;">
-        <span style="font-size:11px; color:var(--text-sub); font-weight:700; text-transform:uppercase;">❄️ Top Losers Hari Ini</span>
+        <span style="font-size:11px; color:var(--text-sub); font-weight:700; text-transform:uppercase;">❄️ Top Losers Perubahan Terakhir</span>
         <div style="display:flex; gap:10px; margin-top:8px; flex-wrap:wrap;">
           ${topLosers.map(l => `
             <div style="background:var(--bg-card); padding:8px 12px; border-radius:6px; flex:1; cursor:pointer;" onclick="viewAsset('${l.ticker}')">
@@ -1783,7 +1882,7 @@ function renderMarketView() {
           <option value="">🌍 Seluruh 60+ Negara / Teritori</option>
           ${countrySelectOptions}
         </select>
-        <input type="search" placeholder="Cari 590+ saham, emiten, ETF, komoditas, kripto..." style="flex:1; min-width:240px;" value="${searchKeyword}" oninput="setSearchKeyword(this.value)">
+        <input type="search" placeholder="Cari 590+ saham, emiten, ETF, komoditas, kripto..." style="flex:1; min-width:240px;" value="${escapeHTML(searchKeyword)}" oninput="setSearchKeyword(this.value)">
       </div>
 
       <div class="tbl-wrap">
@@ -1795,7 +1894,7 @@ function renderMarketView() {
               <th>Status Korporasi</th>
               <th>Sektor</th>
               <th style="text-align:right;" onclick="toggleSort('price')">Harga Terkini (IDR) ${sortColumn==='price'?(sortAsc?'▲':'▼'):''}</th>
-              <th style="text-align:right;" onclick="toggleSort('change')">24 Jam % ${sortColumn==='change'?(sortAsc?'▲':'▼'):''}</th>
+              <th style="text-align:right;" onclick="toggleSort('change')">Perubahan Terakhir ${sortColumn==='change'?(sortAsc?'▲':'▼'):''}</th>
             </tr>
           </thead>
           <tbody>
@@ -1809,7 +1908,15 @@ function renderMarketView() {
 
 function setCategoryFilter(c) { catFilter = c; renderCurrentTab(); }
 function setCountryFilter(c) { ctryFilter = c; renderCurrentTab(); }
-function setSearchKeyword(kw) { searchKeyword = kw; renderCurrentTab(); }
+function setSearchKeyword(kw) {
+  searchKeyword = String(kw || '');
+  const input = document.querySelector('#app-view input[type="search"]');
+  const start = input && typeof input.selectionStart === 'number' ? input.selectionStart : searchKeyword.length;
+  const end = input && typeof input.selectionEnd === 'number' ? input.selectionEnd : start;
+  renderCurrentTab();
+  const next = document.querySelector('#app-view input[type="search"]');
+  if (next) { next.focus(); try { next.setSelectionRange(start, end); } catch (_) {} }
+}
 function toggleSort(col) {
   if(sortColumn === col) sortAsc = !sortAsc;
   else { sortColumn = col; sortAsc = false; }
@@ -1827,15 +1934,44 @@ function viewAsset(ticker) {
 }
 
 /* VIEW: HEATMAP VISUAL SEKTOR PASAR */
+function getAssetSector(asset) {
+  const type = asset[2];
+  const desc = `${asset[1] || ''} ${asset[7] || ''}`.toLowerCase();
+  if (type === 'c') return 'Kripto';
+  if (type === 'k') return 'Komoditas';
+  if (type === 'r') return 'Reksadana';
+  if (type === 'e') {
+    if (/obligasi|bond|treasury|fixed income|surat utang/.test(desc)) return 'Obligasi & Pendapatan Tetap';
+    if (/technology|teknologi|chip|semiconductor|semikonduktor|robot|cybersecurity|cyber security|artificial intelligence|\bai\b/.test(desc)) return 'Teknologi';
+    if (/financial|finansial|bank|financial select|payment|pembayaran|dividend|dividen/.test(desc)) return 'Finansial & Dividen';
+    if (/energy|energi|minyak|gas|solar|clean energy|uranium/.test(desc)) return 'Energi';
+    if (/health|biotech|biotek|farmasi|medical|medis/.test(desc)) return 'Kesehatan';
+    if (/real estate|property|properti|reit/.test(desc)) return 'Properti';
+    if (/gold|emas|silver|perak|copper|tembaga|agriculture|pertanian|commodity|komoditas/.test(desc)) return 'Komoditas';
+    return 'ETF & Indeks';
+  }
+  if (/logistik|kapal|pelayaran|kargo|shipping|freight|kontainer|ekspedisi/.test(desc)) return 'Logistik & Pelayaran';
+  if (/data center|real estat|properti|reit|menara telekomunikasi|jalan tol/.test(desc)) return 'Infrastruktur & Properti';
+  if (/bank|fintech|asuransi|finansial|pembayaran|kredit|lending|investasi|sekuritas/.test(desc)) return 'Finansial';
+  if (/farmasi|kesehatan|medis|biotek|health|obat|nutrisi medis/.test(desc)) return 'Kesehatan';
+  if (/chip|semikonduktor|software|perangkat lunak|cloud|komputasi|teknologi|teknologi|cybersecurity|cyber security|internet|digital|ai | ai$|robotika|otomasi|database|server|jaringan 5g/.test(desc)) return 'Teknologi';
+  if (/energi|minyak|gas bumi|batubara|batu bara|listrik|geotermal|solar|turbin angin/.test(desc)) return 'Energi';
+  if (/tambang|mineral|nikel|tembaga|emas|bauksit|semen|material|petrokimia/.test(desc)) return 'Material & Pertambangan';
+  if (/ritel|konsumen|makanan|minuman|fmcg|fesyen|restoran|e-commerce|marketplace|wisata|hiburan|perawatan pribadi/.test(desc)) return 'Konsumen';
+  if (/telekomunikasi|telekom|jaringan seluler|operator telekom/.test(desc)) return 'Telekomunikasi';
+  if (/otomotif|mobil|pesawat|aviasi|alat berat|konstruksi|manufaktur|pabrik|kereta/.test(desc)) return 'Industri & Transportasi';
+  return type === 's' ? 'Saham Lainnya' : 'Aset Lainnya';
+}
+
 function renderHeatmapView() {
   const sectors = {};
   MASTER_ASSETS.forEach(a => {
-    const sec = a[7].split('&')[0].trim();
+    const sec = getAssetSector(a);
     if(!sectors[sec]) sectors[sec] = [];
     sectors[sec].push({ ticker: a[0], name: a[1], chg: getAssetChange(a[0]), price: getAssetPriceIDR(a[0]) });
   });
 
-  const secKeys = Object.keys(sectors).slice(0, 16);
+  const secKeys = Object.keys(sectors).sort((a,b) => a.localeCompare(b));
 
   return `
     <div class="card">
@@ -1878,8 +2014,8 @@ function renderDetailView() {
   const pnl = curVal - pos.totalInvested;
 
   const slice1Y = hist.slice(-250);
-  const h1Y = Math.max(...slice1Y) * (FX_RATES[item[5]] || 1);
-  const l1Y = Math.min(...slice1Y) * (FX_RATES[item[5]] || 1);
+  const h1Y = Math.max(...slice1Y) * getFXRate(item[5]);
+  const l1Y = Math.min(...slice1Y) * getFXRate(item[5]);
   const isIDStock = (item[3] === 'ID' && item[2] === 's');
 
   const depthBids = [
@@ -2053,6 +2189,28 @@ function recalcOrderTotal() {
   document.getElementById("ord-fee-est").textContent = formatRupiah(total * 0.0015);
 }
 
+function reconcileOrdersAfterSale(ticker) {
+  const pos = State.portfolio[ticker];
+  let cancelled = 0, adjusted = 0;
+  State.orders = (State.orders || []).filter(o => {
+    if (o.ticker !== ticker) return true;
+    if (!pos || pos.qty <= 0.00001) { cancelled++; return false; }
+    if (o.qty > pos.qty) { o.qty = pos.qty; adjusted++; }
+    return o.qty > 0;
+  });
+  State.trailingStops = (State.trailingStops || []).filter(o => {
+    if (o.ticker !== ticker) return true;
+    if (!pos || pos.qty <= 0.00001) { cancelled++; return false; }
+    if (o.qty > pos.qty) { o.qty = pos.qty; adjusted++; }
+    return o.qty > 0;
+  });
+  if (cancelled || adjusted) {
+    const message = `${cancelled} order proteksi dibatalkan dan ${adjusted} disesuaikan untuk ${ticker} setelah penjualan manual.`;
+    addNews(`Penyesuaian Order Proteksi: ${ticker}`, message, false, 'neutral');
+    showToast(`ℹ️ Order ${ticker}: ${cancelled} dibatalkan, ${adjusted} disesuaikan.`);
+  }
+}
+
 function submitOrder(side) {
   const item = ASSET_REGISTRY[activeTicker];
   const isIDStock = (item[3] === 'ID' && item[2] === 's');
@@ -2091,6 +2249,7 @@ function submitOrder(side) {
     else pos.avgPriceIDR = pos.totalInvested / pos.qty;
 
     State.txHistory.unshift({ date: State.currentDate, side: 'SELL', ticker: activeTicker, qty: actualUnits, priceIDR, total: netProceeds });
+    reconcileOrdersAfterSale(activeTicker);
     showToast(`✅ Berhasil menjual ${actualUnits} unit ${activeTicker}`);
   }
 
@@ -2226,12 +2385,20 @@ function applyMacroShock(scenario) {
     shocks = { c: -0.35, XAU: 0.04, BBCA: 0.02, KO: 0.02 };
   }
 
-  for(let key in shocks) {
-    State.macroBoosts[key] = (State.macroBoosts[key] || 0) + shocks[key];
-  }
+  let affected = 0;
+  MASTER_ASSETS.forEach(asset => {
+    const ticker = asset[0];
+    const shock = Object.prototype.hasOwnProperty.call(shocks, ticker) ? shocks[ticker] : (shocks[asset[2]] || 0);
+    const history = State.prices[ticker];
+    if (!shock || !Array.isArray(history) || !history.length) return;
+    const last = history.length - 1;
+    history[last] = Math.max(0.000001, Number((history[last] * Math.max(0.01, 1 + shock)).toFixed(6)));
+    affected++;
+  });
 
-  addNews(`Skenario Stress-Test: ${title}`, `Guncangan harga instan disuntikkan ke sistem simulator.`, true, 'geo');
-  showToast(`💥 Skenario ${title} Berhasil Diterapkan!`);
+  addNews(`Skenario Stress-Test: ${title}`, `Perubahan instan diterapkan ke harga simulasi pada ${affected} aset. Dampak ini tidak ditambahkan ulang setiap hari.`, false, 'geo');
+  saveState();
+  showToast(`💥 ${title}: harga ${affected} aset langsung diperbarui.`);
   renderCurrentTab();
 }
 
@@ -2365,10 +2532,46 @@ function addNewGoal() {
   renderCurrentTab();
 }
 
+function calculatePortfolioBeta() {
+  const benchmark = State.prices.SPY;
+  if (!Array.isArray(benchmark) || benchmark.length < 3) return 1;
+  const marketReturns = [];
+  const count = Math.min(61, benchmark.length);
+  for (let i = benchmark.length - count + 1; i < benchmark.length; i++) marketReturns.push(benchmark[i] / benchmark[i - 1] - 1);
+  const meanM = marketReturns.reduce((a,b) => a + b, 0) / marketReturns.length;
+  const variance = marketReturns.reduce((a,r) => a + (r - meanM) ** 2, 0) / marketReturns.length;
+  if (!Number.isFinite(variance) || variance <= 0) return 1;
+  let portfolioValue = 0;
+  const positions = Object.entries(State.portfolio).map(([ticker, pos]) => {
+    const value = (pos.qty || 0) * getAssetPriceIDR(ticker); portfolioValue += value; return { ticker, value };
+  });
+  if (portfolioValue <= 0) return 1;
+  let weightedBeta = 0;
+  positions.forEach(({ticker, value}) => {
+    const hist = State.prices[ticker];
+    if (!Array.isArray(hist) || hist.length < 3 || value <= 0) return;
+    const n = Math.min(61, hist.length, benchmark.length);
+    const assetReturns = [], market = [];
+    for (let i = 1; i < n; i++) {
+      const ai = hist[hist.length - n + i], ap = hist[hist.length - n + i - 1];
+      const mi = benchmark[benchmark.length - n + i], mp = benchmark[benchmark.length - n + i - 1];
+      if (ap > 0 && mp > 0) { assetReturns.push(ai / ap - 1); market.push(mi / mp - 1); }
+    }
+    if (assetReturns.length < 3) return;
+    const meanA = assetReturns.reduce((a,b) => a + b, 0) / assetReturns.length;
+    const meanBench = market.reduce((a,b) => a + b, 0) / market.length;
+    let cov = 0, varM = 0;
+    for (let i = 0; i < market.length; i++) { cov += (assetReturns[i] - meanA) * (market[i] - meanBench); varM += (market[i] - meanBench) ** 2; }
+    const beta = varM > 0 ? cov / varM : 1;
+    weightedBeta += (value / portfolioValue) * (Number.isFinite(beta) ? beta : 1);
+  });
+  return Number.isFinite(weightedBeta) ? weightedBeta : 1;
+}
+
 /* VIEW: AI INVESTMENT ADVISOR DENGAN ANALITIK INSTITUSIONAL */
 function renderAdvisorView() {
   const { buyCandidates, sellCandidates } = runAIScreener();
-  const betaEstimate = Object.keys(State.portfolio).length > 0 ? (1.05 + randGaussian() * 0.1).toFixed(2) : "1.00";
+  const betaEstimate = (Object.keys(State.portfolio).length > 0 ? calculatePortfolioBeta() : 1).toFixed(2);
 
   const buyHTML = buyCandidates.slice(0, 6).map(c => `
     <div style="background:var(--bg-card); border:1px solid var(--border); padding:12px; border-radius:8px; margin-bottom:10px;">
@@ -2419,6 +2622,7 @@ function renderAdvisorView() {
         <span style="font-size:11px; color:var(--text-sub);">Beta Portofolio: <b>${betaEstimate}</b> (Volatilitas Relatif Pasar)</span>
       </div>
 
+      <p style="font-size:12px;color:var(--text-sub);margin:0 0 14px">Catatan: target TP, SL, dan R:R adalah estimasi heuristik simulator (memakai batas minimum dan level historis/ATR), bukan prediksi harga atau nasihat investasi.</p>
       <div class="grid-main">
         <div>
           <h3 style="font-size:14px; margin-bottom:10px; color:var(--up);">🟢 Rekomendasi BELI Hari Ini (Momentum, Mean-Reversion & Risk/Reward)</h3>
@@ -2463,19 +2667,22 @@ function sendAIChatQuery() {
   const { buyCandidates, sellCandidates } = runAIScreener();
   let text = "";
 
-  let matchedTicker = null;
-  for(let a of MASTER_ASSETS) {
-    if(q.includes(a[0].toLowerCase()) || q.includes(a[1].toLowerCase())) {
-      matchedTicker = a[0];
-      break;
-    }
-  }
+  const qTokens = new Set(q.split(/[^a-z0-9.]+/i).filter(Boolean));
+  const genericNameWords = new Set(['inc','corp','corporation','company','co','the','group','holdings','holding','plc','ltd','limited','international','and','sa','ag','se','bank','global']);
+  const matchedAssets = MASTER_ASSETS.filter(a => {
+    const tickerMatch = hasWholeWord(q, a[0]);
+    const fullNameMatch = q.includes(String(a[1]).toLowerCase());
+    const nameTokens = String(a[1]).toLowerCase().split(/[^a-z0-9]+/i).filter(w => w.length >= 3 && !genericNameWords.has(w));
+    const distinctNameMatch = nameTokens.some(w => qTokens.has(w));
+    return tickerMatch || fullNameMatch || distinctNameMatch;
+  });
+  const matchedTicker = matchedAssets.length === 1 ? matchedAssets[0][0] : null;
 
   if(matchedTicker) {
     const item = ASSET_REGISTRY[matchedTicker];
     const hist = State.prices[matchedTicker];
     const curP = hist[hist.length - 1];
-    const fx = FX_RATES[item[5]] || 1;
+    const fx = getFXRate(item[5]);
     const priceIDR = curP * fx;
     const rsi = calculateRSI(hist, 14);
     const macd = getMACD(hist);
@@ -2487,18 +2694,22 @@ function sendAIChatQuery() {
 
     const trend = ema9 > ema21 ? "BULLISH (Uptrend)" : "BEARISH (Downtrend)";
     const rsiCond = rsi > 70 ? "Overbought (Jenuh Beli)" : rsi < 30 ? "Oversold (Terdiskon Murah)" : "Netral";
+    const atr = getATR(hist, 14);
     const tpIDR = Math.max(priceIDR * 1.08, sr.resistance * fx);
-    const slIDR = Math.min(priceIDR * 0.94, sr.support * fx);
+    const slIDR = Math.max(priceIDR * 0.01, Math.min(priceIDR * 0.94, (curP - atr * 1.5) * fx));
 
     text = `🔍 Laporan Analitik Kuantitatif AI untuk ${item[1]} (${matchedTicker}):\n` +
       `• Harga Terkini: ${formatRupiah(priceIDR)} (${formatPercent(chg)})\n` +
       `• Status Korporasi: ${st.toUpperCase()} | Sektor: ${item[7]}\n` +
       `• Tren Momentum: ${trend} (EMA 9 vs 21)\n` +
       `• Indikator RSI(14): ${rsi.toFixed(1)} [${rsiCond}]\n` +
-      `• Indikator MACD: ${macd.macd > macd.signal ? 'Bullish Crossover' : 'Bearish Divergence'}\n` +
+      `• Posisi MACD: ${macd.macd > macd.signal ? 'di atas signal line (bullish)' : 'di bawah signal line (bearish)'}\n` +
       `• Level Teknis: Support ${formatRupiah(sr.support * fx)} | Resistance ${formatRupiah(sr.resistance * fx)}\n` +
-      `• Rekomendasi Target: TP ${formatRupiah(tpIDR)} | SL Proteksi ${formatRupiah(slIDR)}\n\n` +
+      `• Target/SL heuristik simulator: TP ${formatRupiah(tpIDR)} | SL ${formatRupiah(slIDR)} (bukan prediksi harga)\n\n` +
       `Saran Strategi: ${rsi < 38 ? 'Area akumulasi menarik untuk cicil beli (DCA).' : rsi > 68 ? 'Sebaiknya amankan profit atau pasang Trailing Stop.' : 'Tren berada di konsolidasi wajar, pantau resistance.'}`;
+  } else if(matchedAssets.length > 1) {
+    text = `Saya menemukan beberapa instrumen yang mungkin dimaksud: ${matchedAssets.slice(0, 8).map(a => `${a[0]} (${a[1]})`).join(', ')}.
+Tulis ticker atau nama yang lebih spesifik agar analisis tidak salah aset.`;
   } else if(q.includes("audit") || q.includes("portofolio") || q.includes("evaluasi")) {
     const heldCount = Object.keys(State.portfolio).length;
     const nw = getNetWorth();
@@ -2631,8 +2842,10 @@ function setupCalcListeners() {
     const from = document.getElementById("fx-from").value;
     const to = document.getElementById("fx-to").value;
 
-    const inIDR = amt * (FX_RATES[from] || 1);
-    const result = inIDR / (FX_RATES[to] || 1);
+    const fromRate = getFXRate(from), toRate = getFXRate(to);
+    if (!fromRate || !toRate) { document.getElementById('fx-res').textContent = 'Kurs belum tersedia'; return; }
+    const inIDR = amt * fromRate;
+    const result = inIDR / toRate;
 
     document.getElementById("fx-res").textContent = to === 'IDR' ? formatRupiah(result) : `${result.toLocaleString(undefined, {maximumFractionDigits: 2})} ${to}`;
   };
@@ -2728,25 +2941,81 @@ function exportDataBackup() {
   showToast("📥 File cadangan berhasil diunduh!");
 }
 
+function validateBackupState(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const plainObject = v => !!v && typeof v === 'object' && !Array.isArray(v);
+  if (!plainObject(data.portfolio) || !plainObject(data.prices)) return false;
+  if (!Number.isFinite(data.cash) || data.cash < 0 || !Number.isFinite(data.initialCapital) || data.initialCapital <= 0) return false;
+  for (const key of ['companyStatus','macroBoosts']) if (data[key] != null && !plainObject(data[key])) return false;
+  if (data.creditScore != null && (!Number.isFinite(data.creditScore) || data.creditScore < 0)) return false;
+  if (data.dripEnabled != null && typeof data.dripEnabled !== 'boolean') return false;
+  if (data.currentDate != null && !Number.isFinite(data.currentDate)) return false;
+  if (data.lastSavedDate != null && !Number.isFinite(data.lastSavedDate)) return false;
+  const known = new Set(MASTER_ASSETS.map(a => a[0]));
+  for (const [ticker, hist] of Object.entries(data.prices)) {
+    if (!known.has(ticker) || !Array.isArray(hist) || hist.length < 2 || hist.length > 2000 || hist.some(v => !Number.isFinite(v) || v <= 0)) return false;
+  }
+  for (const [ticker, pos] of Object.entries(data.portfolio)) {
+    if (!known.has(ticker) || !plainObject(pos) || !Number.isFinite(pos.qty) || pos.qty <= 0 || !Number.isFinite(pos.totalInvested) || pos.totalInvested < 0) return false;
+    if (pos.avgPriceIDR != null && (!Number.isFinite(pos.avgPriceIDR) || pos.avgPriceIDR < 0)) return false;
+  }
+  if (data.companyStatus) {
+    for (const [ticker, status] of Object.entries(data.companyStatus)) {
+      if (!known.has(ticker) || !['sehat','naik','waspada','bangkrut'].includes(status)) return false;
+    }
+  }
+  if (data.macroBoosts) {
+    for (const [key, value] of Object.entries(data.macroBoosts)) {
+      if (!Number.isFinite(value)) return false;
+    }
+  }
+  const arrayKeys = ['loans','watchlist','orders','autoInvestPlans','priceAlerts','trailingStops','financialGoals','txHistory','newsFeed'];
+  for (const key of arrayKeys) if (data[key] != null && !Array.isArray(data[key])) return false;
+  if (data.watchlist && data.watchlist.some(t => typeof t !== 'string' || !known.has(t))) return false;
+  if (data.orders && data.orders.some(o => !plainObject(o) || !known.has(o.ticker) || !['TP','SL'].includes(o.type) || !Number.isFinite(o.targetPrice) || o.targetPrice <= 0 || !Number.isFinite(o.qty) || o.qty <= 0)) return false;
+  if (data.autoInvestPlans && data.autoInvestPlans.some(o => !plainObject(o) || !known.has(o.ticker) || !Number.isFinite(o.amountIDR) || o.amountIDR <= 0 || !Number.isFinite(o.frequencyDays) || o.frequencyDays <= 0 || !Number.isFinite(o.nextRunDate) || typeof o.active !== 'boolean')) return false;
+  if (data.priceAlerts && data.priceAlerts.some(o => !plainObject(o) || !known.has(o.ticker) || !['ABOVE','BELOW'].includes(o.condition) || !Number.isFinite(o.targetPrice) || o.targetPrice <= 0 || typeof o.active !== 'boolean')) return false;
+  if (data.trailingStops && data.trailingStops.some(o => !plainObject(o) || !known.has(o.ticker) || !Number.isFinite(o.trailingPct) || o.trailingPct <= 0 || !Number.isFinite(o.highestPriceSeen) || o.highestPriceSeen <= 0 || !Number.isFinite(o.qty) || o.qty <= 0)) return false;
+  if (data.loans && data.loans.some(o => !plainObject(o) || typeof o.name !== 'string' || !Number.isFinite(o.principal) || o.principal < 0 || !Number.isFinite(o.totalMonths) || o.totalMonths <= 0 || !Number.isFinite(o.installment) || o.installment < 0 || !Number.isFinite(o.paidMonths) || o.paidMonths < 0 || !Number.isFinite(o.nextDue))) return false;
+  if (data.financialGoals && data.financialGoals.some(o => !plainObject(o) || typeof o.title !== 'string' || !Number.isFinite(o.targetAmount) || o.targetAmount <= 0)) return false;
+  if (data.txHistory && data.txHistory.some(o => !plainObject(o))) return false;
+  if (data.newsFeed && data.newsFeed.some(o => !plainObject(o))) return false;
+  return true;
+}
+
 function importDataBackup(event) {
   const file = event.target.files[0];
   if(!file) return;
+  if (file.size > 10 * 1024 * 1024) { showToast('❌ File backup terlalu besar (maksimal 10 MB).'); event.target.value = ''; return; }
 
   const reader = new FileReader();
   reader.onload = function(e) {
     try {
       const imported = JSON.parse(e.target.result);
-      if(imported && imported.portfolio && imported.prices) {
+      if (imported && typeof imported === 'object' && !Array.isArray(imported)) {
+        const defaults = { currentDate: Date.now(), lastSavedDate: Date.now(), companyStatus: {}, macroBoosts: {}, loans: [], creditScore: 680, watchlist: [], orders: [], autoInvestPlans: [], priceAlerts: [], trailingStops: [], dripEnabled: false, financialGoals: [], txHistory: [], newsFeed: [] };
+        Object.keys(defaults).forEach(key => { if (imported[key] == null) imported[key] = defaults[key]; });
+      }
+      if (validateBackupState(imported)) {
         State = imported;
+        if (!Array.isArray(State.txHistory)) State.txHistory = [];
+        State.txHistory = State.txHistory.slice(0, 500);
+        if (!Array.isArray(State.newsFeed)) State.newsFeed = [];
+        normalizeNewsFeed();
+        MASTER_ASSETS.forEach(a => {
+          if (!Array.isArray(State.prices[a[0]])) State.prices[a[0]] = genHistory(a);
+          if (!State.companyStatus || !State.companyStatus[a[0]]) { State.companyStatus = State.companyStatus || {}; State.companyStatus[a[0]] = 'sehat'; }
+        });
         saveState();
-        showToast("✅ Berhasil memulihkan data dari file backup!");
+        showToast('✅ Berhasil memulihkan data dari file backup yang valid!');
         renderCurrentTab();
       } else {
-        showToast("❌ Format file backup tidak valid!");
+        showToast('❌ Format backup tidak valid atau berisi data/tipe aset yang tidak dikenal. Data saat ini tidak diubah.');
       }
     } catch(err) {
-      showToast("❌ Gagal membaca file backup!");
-    }
+      console.error('Backup gagal divalidasi', err);
+      showToast('❌ Gagal membaca file backup; data saat ini tidak diubah.');
+    } finally { event.target.value = ''; }
   };
   reader.readAsText(file);
 }
@@ -2890,6 +3159,7 @@ document.addEventListener('DOMContentLoaded', function () {
       return initFreshState();
     }
     ensureState();
+    normalizeNewsFeed();
     MASTER_ASSETS.forEach(a => {
       if (!State.prices[a[0]]) State.prices[a[0]] = genHistory(a);
       if (!State.companyStatus[a[0]]) State.companyStatus[a[0]] = 'sehat';
@@ -2946,7 +3216,7 @@ document.addEventListener('DOMContentLoaded', function () {
   };
   // 5) Simpan otomatis: tiap 10 detik, saat tab disembunyikan, dan saat halaman ditutup
   const safeSave = () => { if (State) { try { saveState(); } catch (e) {} } };
-  setInterval(safeSave, 10000);
+  setInterval(safeSave, 30000);
   document.addEventListener('visibilitychange', () => { if (document.hidden) safeSave(); });
   addEventListener('pagehide', safeSave);
 
@@ -2980,6 +3250,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const price = getAssetPriceIDR(t), net = pos.qty * price * (1 - 0.0025);
     State.cash += net; delete State.portfolio[t];
     State.txHistory.unshift({ date: State.currentDate, side: 'SELL', ticker: t, qty: pos.qty, priceIDR: price, total: net });
+    reconcileOrdersAfterSale(t);
     saveState(); renderCurrentTab(); showToast(`✅ ${t} terjual semua, kas bertambah ${rp(net)}`);
   };
   window.renderPortfolioView = function () {
@@ -3061,7 +3332,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const btn = (k, l) => `<button class="tag-btn ${newsFilter === k ? 'active' : ''}" onclick="setNewsFilter('${k}')">${l}</button>`;
     return `<div class="card"><div class="card-head"><h2>Warta makro dan kejadian pasar</h2><span style="font-size:12.5px;color:var(--text-sub)">${feed.length} kabar tersimpan</span></div>
     <div class="filter-bar">${btn('all', 'Semua')}${present.map(k => btn(k, SENT[k])).join('')}</div>
-    ${list.length ? list.map(n => `<div class="news-item ${esc(n.sent || 'neutral')}"><h3>${esc(n.title)}</h3><p>${esc(n.desc)}</p><div class="m">${esc(n.source || 'Simulasi Global')} · ${formatDate(n.date)} · ${SENT[n.sent || 'neutral'] || 'Netral'}</div></div>`).join('') : empty('Belum ada kabar untuk filter ini', 'Kabar baru muncul seiring simulasi berjalan dan saat ada transaksi otomatis.')}</div>`;
+    ${list.length ? list.map(n => `<div class="news-item ${esc(n.sent || 'neutral')}"><h3>${esc(n.title)}</h3><p>${esc(n.desc)}</p><div class="m">Simulasi BursaBelajar · ${formatDate(n.date)} · ${SENT[n.sent || 'neutral'] || 'Netral'}</div></div>`).join('') : empty('Belum ada kabar untuk filter ini', 'Kabar baru muncul seiring simulasi berjalan dan saat ada transaksi otomatis.')}</div>`;
   };
 
   /* ---------- Kalkulator: fitur tambahan ---------- */
@@ -3269,7 +3540,7 @@ document.addEventListener('DOMContentLoaded', function () {
   const rp = v => formatRupiah(v);
   const $ = id => document.getElementById(id);
 
-  let sb = null, user = null, username = '', nick = '', board = [], lastHash = '', lastSyncAt = null;
+  let sb = null, user = null, username = '', nick = '', board = [], lastHash = '', lastSyncAt = null, cloudUpdatedAt = null;
   let status = 'Menghubungkan...', err = '', busy = false, ready = false, rtOn = false, boardTimer = null, mode = 'in';
 
   function slim() {
@@ -3278,7 +3549,11 @@ document.addEventListener('DOMContentLoaded', function () {
     o.txHistory = (State.txHistory || []).slice(0, 200);
     return JSON.parse(JSON.stringify(o));
   }
-  const hashOf = o => { const s = JSON.stringify(o); let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return h + ':' + s.length; };
+  const hashOf = o => {
+    const comparable = o && typeof o === 'object' ? { ...o } : o;
+    if (comparable && typeof comparable === 'object') delete comparable.currentDate;
+    const s = JSON.stringify(comparable); let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return h + ':' + s.length;
+  };
   const hint = m => /relation|schema cache|does not exist|PGRST205|42P01/i.test(m) ? ' Tabel belum dibuat: jalankan bursabelajar-setup.sql di Supabase SQL Editor.' : '';
   const msg = e => {
     const m = (e && e.message) || String(e);
@@ -3348,8 +3623,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function apply(st) {
     FIELDS.forEach(k => { if (st[k] !== undefined) State[k] = st[k]; });
-    State.txHistory = st.txHistory || [];
+    State.txHistory = Array.isArray(st.txHistory) ? st.txHistory.slice(0, 500) : [];
     MASTER_ASSETS.forEach(a => { if (!State.companyStatus[a[0]]) State.companyStatus[a[0]] = 'sehat'; });
+    normalizeNewsFeed();
     saveState(); renderCurrentTab();
   }
 
@@ -3360,7 +3636,7 @@ document.addEventListener('DOMContentLoaded', function () {
       const { data, error } = await sb.from('saves').select('state,updated_at').eq('user_id', user.id).maybeSingle();
       if (error) throw error;
       try { localStorage.setItem('bb_owner', user.id); } catch (e) {}
-      if (data) { apply(data.state); lastHash = hashOf(slim()); lastSyncAt = Date.now(); status = 'Tersinkron'; showToast('☁️ Riwayatmu dipulihkan'); }
+      if (data) { apply(data.state); cloudUpdatedAt = data.updated_at || null; lastHash = hashOf(slim()); lastSyncAt = Date.now(); status = 'Tersinkron'; showToast('☁️ Riwayatmu dipulihkan'); }
       else if (owner && owner !== user.id) { try { localStorage.removeItem(STORAGE_KEY); } catch (e) {} location.reload(); }
       else await save(true);
     } catch (e) { fail('Muat', e); }
@@ -3372,10 +3648,41 @@ document.addEventListener('DOMContentLoaded', function () {
       const st = slim(), h = hashOf(st);
       if (!manual && h === lastHash) return;
       const nw = getNetWorth(); if (!isFinite(nw)) throw new Error('Kekayaan bersih tidak valid');
-      let r = await sb.from('saves').upsert({ user_id: user.id, state: st, updated_at: new Date().toISOString() });
-      if (r.error) throw r.error;
-      r = await sb.from('leaderboard').upsert({ user_id: user.id, nickname: nick, networth: Math.round(nw), updated_at: new Date().toISOString() });
-      if (r.error) throw r.error;
+      let now = new Date().toISOString(), savedRow = null;
+
+      if (cloudUpdatedAt) {
+        let attempt = await sb.from('saves').update({ state: st, updated_at: now }).eq('user_id', user.id).eq('updated_at', cloudUpdatedAt).select('updated_at').maybeSingle();
+        if (attempt.error) throw attempt.error;
+        savedRow = attempt.data;
+        if (!savedRow) {
+          const latestResult = await sb.from('saves').select('state,updated_at').eq('user_id', user.id).maybeSingle();
+          if (latestResult.error) throw latestResult.error;
+          const latest = latestResult.data;
+          if (!latest) throw new Error('Data cloud berubah atau terhapus. Muat ulang sebelum menyimpan.');
+          const overwrite = confirm('Konflik sinkronisasi: cloud diperbarui dari tab/perangkat lain pada ' + new Date(latest.updated_at).toLocaleString('id-ID') + '. Pilih OK untuk menimpa versi cloud dengan progres perangkat ini; Cancel untuk memuat versi cloud yang lebih baru.');
+          if (!overwrite) {
+            apply(latest.state); cloudUpdatedAt = latest.updated_at; lastHash = hashOf(slim()); lastSyncAt = Date.now(); status = 'Konflik diselesaikan: cloud dimuat';
+            showToast('☁️ Versi cloud yang lebih baru dimuat; progres lokal diganti agar tidak saling menimpa.');
+            return;
+          }
+          now = new Date().toISOString();
+          attempt = await sb.from('saves').update({ state: st, updated_at: now }).eq('user_id', user.id).eq('updated_at', latest.updated_at).select('updated_at').maybeSingle();
+          if (attempt.error) throw attempt.error;
+          if (!attempt.data) throw new Error('Cloud berubah lagi saat konflik diselesaikan. Muat cloud lalu coba simpan ulang.');
+          savedRow = attempt.data;
+        }
+      } else {
+        const inserted = await sb.from('saves').insert({ user_id: user.id, state: st, updated_at: now }).select('updated_at').maybeSingle();
+        if (inserted.error) {
+          if (/duplicate|unique/i.test(inserted.error.message || '')) throw new Error('Data cloud sudah dibuat dari perangkat lain. Muat ulang cloud sebelum menyimpan.');
+          throw inserted.error;
+        }
+        savedRow = inserted.data;
+      }
+
+      cloudUpdatedAt = (savedRow && savedRow.updated_at) || now;
+      const leaderboardResult = await sb.from('leaderboard').upsert({ user_id: user.id, nickname: nick, networth: Math.round(nw), updated_at: new Date().toISOString() });
+      if (leaderboardResult.error) throw leaderboardResult.error;
       lastHash = h; lastSyncAt = Date.now(); err = ''; status = 'Tersinkron';
       if (manual) showToast('☁️ Tersimpan ke cloud');
       fetchBoard();
@@ -3388,7 +3695,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (error) throw error;
       if (!data) return showToast('Belum ada data di cloud');
       if (!confirm('Timpa progres di browser ini dengan data cloud (' + new Date(data.updated_at).toLocaleString('id-ID') + ')?')) return;
-      apply(data.state); lastHash = hashOf(slim()); lastSyncAt = Date.now(); status = 'Tersinkron'; showToast('☁️ Data cloud dimuat');
+      apply(data.state); cloudUpdatedAt = data.updated_at || null; lastHash = hashOf(slim()); lastSyncAt = Date.now(); status = 'Tersinkron'; showToast('☁️ Data cloud dimuat');
     } catch (e) { fail('Muat', e); }
   }
 
